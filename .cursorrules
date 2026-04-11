@@ -1,0 +1,7 @@
+# Hardware Constraints (RTX 5090 Laptop 24GB VRAM, 48GB RAM)
+
+后续重构所有与大模型推理相关的代码时，必须严格遵守以下铁律：
+
+1. **数据加载拉满**：拥有 48GB 内存和极速固态，所有 `DataLoader` 必须使用 `num_workers=8` 和 `pin_memory=True`。
+2. **显存极致压缩**：所有模型必须使用 `torch.bfloat16` 精度加载，并强制指定 `attn_implementation="flash_attention_2"`。
+3. **强制串行防 OOM**：做多分支对比解码（Contrastive Decoding）时，严禁将原图和扰动图拼接成 `Batch=2`。必须强制串行执行：先跑正分支 `logits_pos` -> 立即使用 `del` 删除中间变量并执行 `torch.cuda.empty_cache()` -> 再跑负分支 `logits_neg` -> 最后在内存中相减。

@@ -1,0 +1,52 @@
+[
+  {
+    "question": "Is there a dog in the image? Please answer yes or no.",
+    "best_answer": "No",
+    "all_candidates": [
+      "No",
+      "No",
+      "No",
+      "No.",
+      "No"
+    ],
+    "ae_scores": [
+      0.00012423701225832418,
+      0.00012423701225832418,
+      0.00012423701225832418,
+      0.0004969480490332967,
+      0.00012423701225832418
+    ],
+    "clusters": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "question": "What is the person in the red shirt doing?",
+    "best_answer": "There is no person wearing a red shirt in the image provided. The image shows a street scene with buildings, an overpass, and a few people walking on the sidewalk. One person appears to be holding a phone and walking towards the camera, but they are not wearing a red shirt.",
+    "all_candidates": [
+      "There is no person wearing a red shirt in the image provided. The image shows a street scene with buildings, an overpass, and a few people walking on the sidewalk. One person appears to be holding a phone and walking towards the camera, but they are not wearing a red shirt.",
+      "There is no person wearing a red shirt in the image. The individuals present are wearing different colors such as grey, white, and black. One person in a grey shirt appears to be looking at their phone while walking.",
+      "The person in the image appears to be walking and looking at their phone, likely checking messages or browsing the internet. They are not wearing a red shirt; rather, they are wearing dark-colored clothing. The focus of this individual's attention seems to be on the smartphone they are holding.",
+      "The person in the image appears to be walking on a pedestrian walkway near a road and an overpass. They seem to be using a mobile device, possibly checking messages or navigation. The environment suggests they are in an urban area with modern infrastructure. There is no visible indication that the person is wearing a red shirt; their clothing color is not clear from this image.",
+      "The person in the red shirt appears to be taking a photo or looking at something in their hands, which could be a camera or a phone."
+    ],
+    "ae_scores": [
+      0.02127803305388566,
+      0.024732478731380406,
+      0.021354899605777553,
+      0.025559008557106966,
+      0.033864476188037194
+    ],
+    "clusters": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  }
+]
