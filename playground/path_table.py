@@ -10,7 +10,7 @@ _PATH_TABLE = {
     "llava-v1.6-vicuna-7b": "liuhaotian/llava-v1.6-vicuna-7b",
     "llava-v1.6-vicuna-13b": "liuhaotian/llava-v1.6-vicuna-7b",
     "llava-v1.6-34b": "liuhaotian/llava-v1.6-34b",
-    "Qwen-VL-Chat": "Qwen/Qwen-VL-Chat",
+    "Qwen2.5-VL-7B-Instruct": "Qwen/Qwen2.5-VL-7B-Instruct",
     "POPE folder path": "./benchs/pope",
     # You should set up these paths.
     # Please download COCO dataset from https://cocodataset.org/

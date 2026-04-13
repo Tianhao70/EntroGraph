@@ -1,0 +1,64 @@
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Large model weights and checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.h5
+*.gguf
+*.onnx
+
+# Data files
+*.csv
+*.tsv
+*.jsonl
+*.npy
+*.npz
+*.sqlite
+*.db
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Evaluation Output
+results_*.json
+mhcd_eval_results.json
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

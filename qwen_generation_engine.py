@@ -61,6 +61,10 @@ class MHCDGenerator:
                     "text": generated_text[0],
                     "config": config
                 })
+                
+                # 销毁每次生成的候选张量，防 OOM
+                del output_ids
+                torch.cuda.empty_cache()
             
             all_results.append({
                 "question": raw_items[0]['question'],

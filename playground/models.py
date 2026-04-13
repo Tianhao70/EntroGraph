@@ -487,29 +487,25 @@ class LLaVA(LM):
 
 class QwenVL(LM):
     def __init__(self) -> None:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        import torch
+        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
         from transformers.generation import GenerationConfig
 
-        name = "Qwen-VL-Chat"
+        name = "Qwen2.5-VL-7B-Instruct"
 
         super().__init__(name)
 
-        model_path = os.fspath(get_path_from_table(name))
+        model_path = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-        # Note: The default behavior now has injection attack prevention off.
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
+        self.processor = AutoProcessor.from_pretrained(model_path)
+        self.tokenizer = self.processor.tokenizer
 
-        # use bf16
-        # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", trust_remote_code=True, bf16=True).eval()
-        # use fp16
-        # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", trust_remote_code=True, fp16=True).eval()
-        # use cpu only
-        # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="cpu", trust_remote_code=True).eval()
-        # use cuda device
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path, device_map="cuda", trust_remote_code=True
+        # 严格遵守 .cursorrules 硬件约束：bf16 + flash_attention_2
+        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_path,
+            device_map="cuda",
+            torch_dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2"
         ).eval()
 
         # Specify hyperparameters for generation
