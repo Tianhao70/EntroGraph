@@ -62,3 +62,10 @@ mhcd_eval_results.json
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Temporary debug files
+out.txt
+ps_main.txt
+test.txt
+time_greedy.txt
+total_items.txt
