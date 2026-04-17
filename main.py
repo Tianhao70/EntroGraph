@@ -23,14 +23,19 @@ def load_dataset_from_path(dataset_path):
             
     jsonl_files = []
     if os.path.isdir(dataset_path):
-        # 使用 os.walk 强制全目录扫描，确保深入所有子文件夹读取正确的 .jsonl
+        # os.walk 全目录扫描，只读取文件名包含 adversarial 的 .jsonl（论文核心对抗集）
         for root, dirs, files in os.walk(dataset_path):
             for file in files:
-                if file.endswith('.jsonl'):
+                if file.endswith('.jsonl') and 'adversarial' in file:
                     jsonl_files.append(os.path.join(root, file))
     elif str(dataset_path).endswith('.jsonl'):
         jsonl_files = [dataset_path]
-        
+
+    if not jsonl_files:
+        raise FileNotFoundError(f"严重错误：在 {dataset_path} 下未找到任何 adversarial .jsonl 文件！")
+
+    print(f"📂 扫描到 {len(jsonl_files)} 个对抗集文件: {[os.path.basename(f) for f in jsonl_files]}")
+
     dataset = []
     for jfile in jsonl_files:
         with open(jfile, "r", encoding="utf-8") as f:
@@ -38,31 +43,20 @@ def load_dataset_from_path(dataset_path):
                 if not line.strip():
                     continue
                 data = json.loads(line)
-                
+
                 # POPE schema -> 通用 schema
                 image_name = data.get("image", "")
                 question = data.get("text", "")
                 if not question and "question" in data:
                     question = data["question"]
                 label = data.get("label", data.get("ground_truth", ""))
-                
-                # 尝试通过本地环境解析真实图片路径，找不到则先设为 fallback 的 demo图防崩溃
-                img_path = image_name
-                try:
-                    from playground.path_table import get_path_from_table
-                    if "coco" in jfile.lower():
-                        base = get_path_from_table("COCO path")
-                        img_path = os.path.join(base, image_name)
-                    elif "gqa" in jfile.lower():
-                        base = get_path_from_table("GQA path")
-                        img_path = os.path.join(base, image_name)
-                except Exception:
-                    pass
-                
+
+                # 强制拼接 COCO val2014 图片绝对路径
+                COCO_IMAGE_ROOT = "/home/tianhao/LLM_Workspace/datasets/coco/val2014"
+                img_path = os.path.join(COCO_IMAGE_ROOT, image_name)
                 if not os.path.exists(img_path):
-                    # Fallback
-                    img_path = "assets/demo1.jpg"
-                    
+                    raise FileNotFoundError(f"严重错误：找不到测试图像 {img_path}")
+
                 dataset.append({
                     "image_path": img_path,
                     "question": question + " Please answer yes or no.",
@@ -113,12 +107,8 @@ def main():
     real_dataset = load_dataset_from_path(args.dataset)
     print(f"✅ 成功从 {args.dataset} 加载了 {len(real_dataset)} 笔测试数据。")
     
-    # 按照严格类型要求：将普通 Python List 包装提升为 HuggingFace datasets.Dataset 结构
-    import datasets
-    hf_dataset = datasets.Dataset.from_list(real_dataset)
-    
-    # 高吞吐 DataLoader, Batch Size 设为 1
-    dataloader = build_high_throughput_dataloader(hf_dataset, processor, batch_size=1)
+    # 高吞吐 DataLoader, Batch Size 设为 1（直接传入 List，无需额外类型转换）
+    dataloader = build_high_throughput_dataloader(real_dataset, processor, batch_size=1)
 
     # ---------------------------------------------------------
     # 步骤 4/5：引擎点火执行与裁决

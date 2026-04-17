@@ -1,33 +1,31 @@
 #!/bin/bash
+set -e  # 任何一步出错，立刻 exit 1 中断整条流水线
 
-# 定义需要评测的数据集列表
-DATASETS=("benchs/pope/coco" "aokvqa" "gqa")
+DATASETS=("benchs/pope/coco")
+METHODS=("greedy" "mhcd-ae")
 
 echo "==============================================="
-echo "  🚀 开始批量执行 MHCD-AE 测试集评测流水线  "
+echo "  🚀 双轨评测流水线启动 (adversarial only)    "
+echo "  数据集: ${DATASETS[*]}"
+echo "  方法:   ${METHODS[*]}"
 echo "==============================================="
 
 for dataset in "${DATASETS[@]}"
 do
-    echo ""
-    echo "-----------------------------------------------"
-    echo "👉 正在评测数据集: $dataset"
-    echo "-----------------------------------------------"
-    
-    # 调用 main.py，通过命令行参数传递当前数据集名称与默认方法 (你可以手动修改为 greedy 测试)
-    python main.py --dataset "$dataset" --method mhcd-ae
-    
-    # 检查上一条命令是否执行成功
-    if [ $? -eq 0 ]; then
-        echo "✅ 数据集 $dataset 评测完成！"
-    else
-        echo "❌ 数据集 $dataset 评测失败或被中断！"
-        # 可以选择是否遇到错误就退出
-        # exit 1
-    fi
+    for method in "${METHODS[@]}"
+    do
+        echo ""
+        echo "-----------------------------------------------"
+        echo "👉 正在评测: $dataset | 模式: $method"
+        echo "-----------------------------------------------"
+
+        python main.py --dataset "$dataset" --method "$method"
+
+        echo "✅ [$dataset × $method] 评测完成！"
+    done
 done
 
 echo ""
 echo "==============================================="
-echo "  🎉 所有数据集批量评测完成！  "
+echo "  🎉 全部 双轨×三数据集 评测完成！            "
 echo "==============================================="

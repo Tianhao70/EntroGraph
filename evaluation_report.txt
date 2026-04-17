@@ -1,0 +1,24 @@
+Loading greedy results...
+--------------------------------------------------
+====== GREEDY MODE (Baseline) ======
+Accuracy    : 87.37%
+Precision   : 93.89%
+Recall      : 79.93%
+F1          : 86.35%
+Yes Ratio   : 42.57%
+
+Loading MHCD-AE results...
+--------------------------------------------------
+====== MHCD-AE MODE (Ours) ======
+Accuracy    : 86.97%
+Precision   : 92.88%
+Recall      : 80.07%
+F1          : 86.00%
+Yes Ratio   : 43.10%
+--------------------------------------------------
+====== COMPARISON (MHCD-AE vs GREEDY) ======
+Accuracy    : -0.40%
+Precision   : -1.01%
+Recall      : +0.13%
+F1          : -0.35%
+Yes Ratio   : +0.53%
