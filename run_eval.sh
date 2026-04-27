@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e  # 任何一步出错，立刻 exit 1 中断整条流水线
 
-DATASETS=("benchs/pope/coco")
+DATASETS=("benchs/pope/coco/coco_pope_adversarial.jsonl")
 METHODS=("greedy" "mhcd-ae")
 
 echo "==============================================="

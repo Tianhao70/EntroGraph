@@ -1,101 +1,188 @@
-import numpy as np
-import torch
-from sentence_transformers import SentenceTransformer
-from sklearn.cluster import AgglomerativeClustering
-from scipy.spatial.distance import pdist, squareform
+import re
+from array import array
+from collections import Counter
+from math import ceil
+
 
 class MHCDScorer:
     """
-    MHCD-AE 阶段四：单答案熵计算与对比重排引擎
+    Selects one answer from MHCD candidates.
+
+    For POPE-style yes/no evaluation, the scorer uses label-level evidence
+    instead of whole question-answer embeddings. Embedding clustering remains as
+    a lazy fallback for non-binary answers.
     """
-    def __init__(self, device="cuda"):
-        print("🧠 正在加载轻量级语义裁决官 (BGE-Small)...")
-        # 使用 BGE-Small，它极小极快，几乎不吃显存，完美适合做裁判
-        self.encoder = SentenceTransformer('BAAI/bge-small-zh-v1.5', device=device)
-        self.gamma = 0.3  # 导师推荐的对比重排强度参数
-        
+
+    YES_NO_RE = re.compile(r"\b(yes|no)\b", re.IGNORECASE)
+
+    def __init__(self, device="cuda", encoder_model="BAAI/bge-small-en-v1.5"):
+        print("MHCDScorer: using binary yes/no adjudication with lazy embedding fallback.")
+        self.device = device
+        self.encoder_model = encoder_model
+        self.encoder = None
+        self.gamma = 0.3
+        self.last_mode = None
+        self.last_candidate_labels = None
+        self.last_label_counts = None
+
+    @classmethod
+    def extract_yes_no(cls, text):
+        matches = cls.YES_NO_RE.findall(str(text).lower())
+        if not matches:
+            return None
+        unique = set(matches)
+        if len(unique) != 1:
+            return None
+        return matches[0]
+
     def score_and_select(self, question, candidates):
         """
-        核心逻辑：聚类 -> 算熵 -> 对比重排 -> 选出最终答案
-        candidates: List of strings (K=5)
-        """
-        K = len(candidates)
-        if K < 2:
-            return candidates[0]
+        Return (best_answer, scores, clusters).
 
-        # 1. 构造拼接文本并提取句向量 (q ⊕ [SEP] ⊕ a_i)
-        texts = [f"{question} [SEP] {ans}" for ans in candidates]
-        embeddings = self.encoder.encode(texts, normalize_embeddings=True) # (K, D)
-        
-        # 2. 计算距离矩阵与凝聚聚类
-        # 余弦距离矩阵
-        dist_matrix = squareform(pdist(embeddings, metric='cosine'))
-        
-        # 聚类 (距离阈值设为0.15，可根据实际语料微调)
+        In binary mode:
+        - clusters are label ids: no=0, yes=1, unknown=-1.
+        - scores are lower for the selected/stronger label.
+        """
+        if not candidates:
+            self.last_mode = "empty"
+            self.last_candidate_labels = []
+            self.last_label_counts = {}
+            return "", array("d"), array("i")
+
+        if len(candidates) == 1:
+            label = self.extract_yes_no(candidates[0])
+            self.last_mode = "single"
+            self.last_candidate_labels = [label]
+            self.last_label_counts = dict(Counter([label])) if label else {}
+            return candidates[0], array("d", [0.0]), array("i", [self._label_to_cluster(label)])
+
+        binary_result = self._score_binary_candidates(candidates)
+        if binary_result is not None:
+            return binary_result
+
+        return self._score_with_embeddings(question, candidates)
+
+    def _score_binary_candidates(self, candidates):
+        labels = [self.extract_yes_no(candidate) for candidate in candidates]
+        known_labels = [label for label in labels if label in ("yes", "no")]
+        if len(known_labels) < max(1, (len(candidates) // 2) + 1):
+            return None
+
+        counts = Counter(known_labels)
+        most_common = counts.most_common()
+        majority_label, majority_count = most_common[0]
+        anchor_label = labels[0]
+
+        # Use the low-temperature first path as the anchor unless the other
+        # paths show strong agreement. This avoids letting stochastic sampling
+        # turn a weak yes bias into extra false positives.
+        strong_agreement = majority_count >= max(2, int(ceil(0.8 * len(known_labels))))
+        if strong_agreement or anchor_label not in ("yes", "no"):
+            selected_label = majority_label
+            mode = "binary_supermajority" if strong_agreement else "binary_majority"
+        else:
+            selected_label = anchor_label
+            mode = "binary_anchor"
+
+        best_idx = 0
+        if labels[0] != selected_label:
+            best_idx = next(i for i, label in enumerate(labels) if label == selected_label)
+
+        scores = [1.0] * len(candidates)
+        for i, label in enumerate(labels):
+            if label in ("yes", "no"):
+                # Lower is better. Candidates from the selected label group
+                # receive the smallest score; minority labels are penalized.
+                label_confidence = counts[label] / len(known_labels)
+                scores[i] = 1.0 - label_confidence
+                if label != selected_label:
+                    scores[i] += 1.0
+
+        clusters = [self._label_to_cluster(label) for label in labels]
+        self.last_mode = mode
+        self.last_candidate_labels = labels
+        self.last_label_counts = dict(counts)
+        return candidates[best_idx], array("d", scores), array("i", clusters)
+
+    @staticmethod
+    def _label_to_cluster(label):
+        if label == "yes":
+            return 1
+        if label == "no":
+            return 0
+        return -1
+
+    def _ensure_encoder(self):
+        if self.encoder is None:
+            from sentence_transformers import SentenceTransformer
+
+            self.encoder = SentenceTransformer(self.encoder_model, device=self.device)
+        return self.encoder
+
+    def _score_with_embeddings(self, question, candidates):
+        import numpy as np
+        from scipy.spatial.distance import pdist, squareform
+        from sklearn.cluster import AgglomerativeClustering
+
+        encoder = self._ensure_encoder()
+        # Encode answers only. Including the full question makes yes/no-like
+        # answers collapse into a single cluster because the question dominates.
+        texts = [str(ans) for ans in candidates]
+        embeddings = encoder.encode(texts, normalize_embeddings=True)
+        dist_matrix = squareform(pdist(embeddings, metric="cosine"))
+
         clustering = AgglomerativeClustering(
-            n_clusters=None, 
-            distance_threshold=0.15, 
-            metric='precomputed', 
-            linkage='average'
+            n_clusters=None,
+            distance_threshold=0.15,
+            metric="precomputed",
+            linkage="average",
         )
         labels = clustering.fit_predict(dist_matrix)
-        
-        # 3. 计算 Answer Entropy (黑盒简化版)
-        AE_scores = np.zeros(K)
-        for i in range(K):
+
+        k = len(candidates)
+        ae_scores = np.zeros(k)
+        for i in range(k):
             my_cluster = labels[i]
             cluster_indices = np.where(labels == my_cluster)[0]
             cluster_size = len(cluster_indices)
-            
-            # H_local: 局部不一致度 (自己与本簇其他成员的平均距离)
+
             if cluster_size > 1:
                 other_indices = cluster_indices[cluster_indices != i]
                 h_local = np.mean(dist_matrix[i, other_indices])
             else:
-                h_local = 1.0 # 孤立点，局部不确定性极高
-                
-            # H_mem: 软归属熵 (所在簇越小，越像离群值，惩罚越大)
-            h_mem = 1.0 - (cluster_size / K)
-            
-            # 计算单答案熵 AE_i
-            AE_scores[i] = 0.7 * h_mem + 0.3 * h_local
+                h_local = 1.0
 
-        # 4. 找到最优 (i+) 和最差 (i-) 答案
-        i_plus = np.argmin(AE_scores)
-        i_minus = np.argmax(AE_scores)
-        
-        delta_H = AE_scores[i_minus] - AE_scores[i_plus]
-        
-        # 5. 决策路由
-        # 导师逻辑：如果大家都很一致 (簇少，或 Delta H 极小)，没必要重排，直接返回最好的
+            h_mem = 1.0 - (cluster_size / k)
+            ae_scores[i] = 0.7 * h_mem + 0.3 * h_local
+
+        i_plus = np.argmin(ae_scores)
+        i_minus = np.argmax(ae_scores)
+        delta_h = ae_scores[i_minus] - ae_scores[i_plus]
         num_clusters = len(set(labels))
-        if num_clusters == 1 or delta_H < 0.1:
-            return candidates[i_plus], AE_scores, labels
-            
-        # 6. 对比重排 (Contrastive Reranking)
-        # S_i = -AE_i + gamma * (cos(z_i, z_{i^+}) - cos(z_i, z_{i^-}))
-        final_scores = np.zeros(K)
-        for i in range(K):
+
+        self.last_mode = "embedding_cluster"
+        self.last_candidate_labels = [None for _ in candidates]
+        self.last_label_counts = {}
+
+        if num_clusters == 1 or delta_h < 0.1:
+            return candidates[i_plus], ae_scores, labels
+
+        final_scores = np.zeros(k)
+        for i in range(k):
             cos_to_plus = 1.0 - dist_matrix[i, i_plus]
             cos_to_minus = 1.0 - dist_matrix[i, i_minus]
-            final_scores[i] = -AE_scores[i] + self.gamma * (cos_to_plus - cos_to_minus)
-            
+            final_scores[i] = -ae_scores[i] + self.gamma * (cos_to_plus - cos_to_minus)
+
         best_idx = np.argmax(final_scores)
-        return candidates[best_idx], AE_scores, labels
+        return candidates[best_idx], ae_scores, labels
+
 
 if __name__ == "__main__":
-    # 模拟测试：假设生成器输出了 5 个答案，其中 1 个是幻觉
-    scorer = MHCDScorer()
-    q = "图中穿红色衣服的人在做什么？"
-    simulated_candidates = [
-        "穿红色衣服的人正在踢足球。",             # 稳妥
-        "图中红色衣服的男子在草地上踢球。",        # 稳妥
-        "一个红衣人正在绿茵场上射门。",            # 稳妥
-        "红衣服的人正和一只狗在玩飞盘。",          # 严重幻觉！(距离远，自成一簇)
-        "那个穿红色衣服的人在奔跑着踢足球。"        # 稳妥
-    ]
-    
+    scorer = MHCDScorer(device="cpu")
+    q = "Is there a dog in the image? Please answer yes or no."
+    simulated_candidates = ["no", "yes", "no", "no", "no"]
     best_ans, ae, clusters = scorer.score_and_select(q, simulated_candidates)
-    print("\n=== 裁决结果 ===")
+    print("\n=== Selection result ===")
     for i, ans in enumerate(simulated_candidates):
-        print(f"[{'最佳' if ans==best_ans else '候选'}] 簇:{clusters[i]} | AE熵:{ae[i]:.4f} | {ans}")
+        marker = "best" if ans == best_ans else "cand"
+        print(f"[{marker}] cluster:{clusters[i]} | score:{ae[i]:.4f} | {ans}")

@@ -10,6 +10,17 @@ from qwen_data_engine import build_high_throughput_dataloader
 from qwen_generation_engine import MHCDGenerator
 from qwen_entropy_scorer import MHCDScorer
 
+
+def get_attention_implementation():
+    try:
+        import flash_attn  # noqa: F401
+
+        return "flash_attention_2"
+    except ImportError:
+        print("⚠️ 未检测到 flash-attn，自动使用 PyTorch SDPA 注意力实现。")
+        return "sdpa"
+
+
 def load_dataset_from_path(dataset_path):
     """
     自适应读取给定的测试集路径中的 JSONL 文件。
@@ -23,11 +34,21 @@ def load_dataset_from_path(dataset_path):
             
     jsonl_files = []
     if os.path.isdir(dataset_path):
-        # os.walk 全目录扫描，只读取文件名包含 adversarial 的 .jsonl（论文核心对抗集）
+        official_files = []
+        resampled_files = []
+        # For final POPE evaluation, prefer the official adversarial split and
+        # do not mix it with resampled head-identification files.
         for root, dirs, files in os.walk(dataset_path):
-            for file in files:
-                if file.endswith('.jsonl') and 'adversarial' in file:
-                    jsonl_files.append(os.path.join(root, file))
+            for file in sorted(files):
+                lower_name = file.lower()
+                if not file.endswith('.jsonl') or 'adversarial' not in lower_name:
+                    continue
+                full_path = os.path.join(root, file)
+                if 'resampled' in lower_name:
+                    resampled_files.append(full_path)
+                else:
+                    official_files.append(full_path)
+        jsonl_files = official_files if official_files else resampled_files
     elif str(dataset_path).endswith('.jsonl'):
         jsonl_files = [dataset_path]
 
@@ -37,11 +58,13 @@ def load_dataset_from_path(dataset_path):
     print(f"📂 扫描到 {len(jsonl_files)} 个对抗集文件: {[os.path.basename(f) for f in jsonl_files]}")
 
     dataset = []
-    for jfile in jsonl_files:
+    for jfile in sorted(jsonl_files):
         with open(jfile, "r", encoding="utf-8") as f:
+            row_idx = 0
             for line in f:
                 if not line.strip():
                     continue
+                row_idx += 1
                 data = json.loads(line)
 
                 # POPE schema -> 通用 schema
@@ -59,8 +82,12 @@ def load_dataset_from_path(dataset_path):
 
                 dataset.append({
                     "image_path": img_path,
+                    "image_name": image_name,
                     "question": question + " Please answer yes or no.",
-                    "ground_truth": label
+                    "ground_truth": label,
+                    "question_id": data.get("question_id"),
+                    "source_file": os.path.basename(jfile),
+                    "source_index": row_idx
                 })
     return dataset
 
@@ -79,13 +106,14 @@ def main():
     # ---------------------------------------------------------
     # 步骤 1：全副武装，请神登基 (加载 Qwen2.5-VL)
     # ---------------------------------------------------------
-    print("\n[1/5] 正在装载主模型 (BF16 + FlashAttention-2)...")
+    attn_implementation = get_attention_implementation()
+    print(f"\n[1/5] 正在装载主模型 (BF16 + {attn_implementation})...")
     model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
     
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_id,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_implementation,
         device_map="cuda"
     )
     processor = AutoProcessor.from_pretrained(model_id)
@@ -130,13 +158,20 @@ def main():
             
             best_ans, ae_scores, clusters = scorer.score_and_select(question, candidates_texts)
             
-            final_report.append({
+            report_item = {
                 "question": question,
                 "best_answer": best_ans,
                 "all_candidates": candidates_texts,
                 "ae_scores": ae_scores.tolist(),
-                "clusters": clusters.tolist()
-            })
+                "clusters": clusters.tolist(),
+                "selection_mode": getattr(scorer, "last_mode", None),
+                "candidate_labels": getattr(scorer, "last_candidate_labels", None),
+                "label_counts": getattr(scorer, "last_label_counts", None)
+            }
+            for key in ("ground_truth", "image_path", "image_name", "question_id", "source_file", "source_index"):
+                if item.get(key) is not None:
+                    report_item[key] = item[key]
+            final_report.append(report_item)
             
             print(f"\n❓ 问题: {question}")
             print(f"🌟 最终优选答案 (最低熵): {best_ans}")
@@ -157,11 +192,15 @@ def main():
             input_len = batch_inputs['input_ids'].shape[1]
             generated_text = processor.batch_decode(output_ids[:, input_len:], skip_special_tokens=True)
             
-            final_report.append({
+            report_item = {
                 "question": raw_items[0]['question'],
                 "best_answer": generated_text[0],
                 "ground_truth": raw_items[0]['ground_truth']
-            })
+            }
+            for key in ("image_path", "image_name", "question_id", "source_file", "source_index"):
+                if raw_items[0].get(key) is not None:
+                    report_item[key] = raw_items[0][key]
+            final_report.append(report_item)
             
             print(f"\n❓ 问题: {raw_items[0]['question']}")
             print(f"🌟 Greedy 答案: {generated_text[0]}")
@@ -173,7 +212,7 @@ def main():
         print(f"\n[5/5] ✅ Greedy 生成完毕！耗时: {gen_time:.2f} 秒")
 
     # 动态命名保存结果文件
-    dataset_basename = os.path.basename(args.dataset.strip('/'))
+    dataset_basename = os.path.splitext(os.path.basename(args.dataset.strip('/')))[0]
     if not dataset_basename:
         dataset_basename = "unknown_dataset"
         

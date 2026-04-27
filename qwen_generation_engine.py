@@ -66,10 +66,15 @@ class MHCDGenerator:
                 del output_ids
                 torch.cuda.empty_cache()
             
-            all_results.append({
+            raw_item = raw_items[0]
+            result_item = {
                 "question": raw_items[0]['question'],
                 "candidates": batch_candidates
-            })
+            }
+            for key in ("ground_truth", "image_path", "image_name", "question_id", "source_file", "source_index"):
+                if raw_item.get(key) is not None:
+                    result_item[key] = raw_item[key]
+            all_results.append(result_item)
             
         return all_results
 
