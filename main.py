@@ -15,13 +15,17 @@ def get_attention_implementation():
         return "sdpa"
 
 
-def seed_everything(seed):
+def seed_everything(seed: int):
+    import numpy as np
     import torch
 
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = False
 
 
 def default_max_new_tokens(method):
@@ -30,7 +34,7 @@ def default_max_new_tokens(method):
     return 128
 
 
-def load_dataset_from_path(dataset_path, coco_image_root):
+def load_dataset_from_path(dataset_path, coco_image_root, split="all"):
     """
     自适应读取给定的测试集路径中的 JSONL 文件。
     并将原始数据的 schema 统一映射为 {'image_path', 'question', 'ground_truth'}
@@ -43,28 +47,23 @@ def load_dataset_from_path(dataset_path, coco_image_root):
             
     jsonl_files = []
     if os.path.isdir(dataset_path):
-        official_files = []
-        resampled_files = []
-        # For final POPE evaluation, prefer the official adversarial split and
-        # do not mix it with resampled head-identification files.
+        accepted_splits = ("random", "popular", "adversarial") if split == "all" else (split,)
         for root, dirs, files in os.walk(dataset_path):
             for file in sorted(files):
                 lower_name = file.lower()
-                if not file.endswith('.jsonl') or 'adversarial' not in lower_name:
+                if not file.endswith(".jsonl"):
                     continue
-                full_path = os.path.join(root, file)
-                if 'resampled' in lower_name:
-                    resampled_files.append(full_path)
-                else:
-                    official_files.append(full_path)
-        jsonl_files = official_files if official_files else resampled_files
+                if any(split_name in lower_name for split_name in accepted_splits):
+                    jsonl_files.append(os.path.join(root, file))
     elif str(dataset_path).endswith('.jsonl'):
         jsonl_files = [dataset_path]
 
     if not jsonl_files:
-        raise FileNotFoundError(f"严重错误：在 {dataset_path} 下未找到任何 adversarial .jsonl 文件！")
+        raise FileNotFoundError(
+            f"在 {dataset_path} 下未找到 split={split} 的 .jsonl 文件"
+        )
 
-    print(f"📂 扫描到 {len(jsonl_files)} 个对抗集文件: {[os.path.basename(f) for f in jsonl_files]}")
+    print(f"📂 扫描到 {len(jsonl_files)} 个 split={split} 文件: {[os.path.basename(f) for f in jsonl_files]}")
 
     dataset = []
     for jfile in sorted(jsonl_files):
@@ -197,12 +196,20 @@ def main():
     )
     parser.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct")
     parser.add_argument("--dataset", type=str, required=True, help="具体的测试集路径（如 benchs/pope/coco）")
+    parser.add_argument(
+        "--split",
+        type=str,
+        choices=["random", "popular", "adversarial", "all"],
+        default="all",
+    )
     parser.add_argument("--coco-image-root", type=str, required=True, help="COCO val2014 图像根目录")
     parser.add_argument("--output-dir", type=str, default="outputs", help="结果 JSON 输出目录")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="未设置时：POPE/label 方法默认 8，生成方法默认 128")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--neg-type", type=str, choices=["gaussian", "blur", "gray"], default="gaussian")
+    parser.add_argument("--neg-type", type=str, choices=["gaussian", "blur", "gray", "text_only"], default="gaussian")
     parser.add_argument("--neg-std", type=float, default=0.2)
+    parser.add_argument("--perturb-seed-base", type=int, default=None, help="样本级扰动 seed 基准；默认等于 --seed")
+    parser.add_argument("--limit", type=int, default=None, help="只取前 N 条样本，用于调试")
     parser.add_argument("--alpha0", type=float, default=0.5)
     parser.add_argument("--alpha-max", type=float, default=2.0)
     parser.add_argument("--k-entropy", type=float, default=0.8)
@@ -214,6 +221,7 @@ def main():
     args = parser.parse_args()
     method = args.method
     max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else default_max_new_tokens(method)
+    perturb_seed_base = args.seed if args.perturb_seed_base is None else args.perturb_seed_base
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.trace_dir, exist_ok=True)
 
@@ -222,7 +230,7 @@ def main():
 
     from qwen_data_engine import build_high_throughput_dataloader
     from src.decoding.candidate_generator import EGMHCDGenerator, SampleMajorityGenerator
-    from src.decoding.label_cd import EGLabelCDScorer
+    from src.decoding.label_cd import EGLabelCDScorer, LabelPositiveScorer
     from src.decoding.token_cd import TokenCDGenerator
     from src.scoring.sindex_answer_entropy import EGAnswerEntropyScorer, MHCDScorer
 
@@ -231,9 +239,11 @@ def main():
     print("="*50)
     print("🚀 启动 EG-MHCD-AE v2 评测流水线 (Powered by RTX 5090)")
     print(f"📊 数据集设定: {args.dataset}")
+    print(f"📊 split: {args.split}")
     print(f"🖼️  COCO 图像根目录: {args.coco_image_root}")
     print(f"⚙️  解码模式设定: {method}")
     print(f"🎲 随机种子: {args.seed}")
+    print(f"🎲 扰动 seed 基准: {perturb_seed_base}")
     print(f"🧪 负样本扰动: {args.neg_type} (std={args.neg_std})")
     print(f"🔢 max_new_tokens: {max_new_tokens}")
     print("="*50)
@@ -262,16 +272,20 @@ def main():
         label_beta = 0.0 if method == "label_pos" else args.alpha0
         label_k_entropy = args.k_entropy if method == "eg_label_cd" else 0.0
         print(f"\n[2/5] 正在初始化 POPE label-level scorer (β={label_beta})...")
-        label_scorer = EGLabelCDScorer(
-            model,
-            processor,
-            beta=label_beta,
-            temperature=args.temperature,
-            alpha_max=args.alpha_max,
-            k_entropy=label_k_entropy,
-            neg_type=args.neg_type,
-            neg_std=args.neg_std,
-        )
+        if method == "label_pos":
+            label_scorer = LabelPositiveScorer(model, processor, temperature=args.temperature)
+        else:
+            label_scorer = EGLabelCDScorer(
+                model,
+                processor,
+                beta=label_beta,
+                temperature=args.temperature,
+                alpha_max=args.alpha_max,
+                k_entropy=label_k_entropy,
+                neg_type=args.neg_type,
+                neg_std=args.neg_std,
+                perturb_seed_base=perturb_seed_base,
+            )
     elif method == "token_cd":
         print("\n[2/5] 正在初始化 true token-level contrastive decoder...")
         generator = TokenCDGenerator(
@@ -283,6 +297,9 @@ def main():
             top_k=args.topk_plausible,
             max_new_tokens=max_new_tokens,
             do_sample=False,
+            neg_type=args.neg_type,
+            neg_std=args.neg_std,
+            perturb_seed_base=perturb_seed_base,
         )
     elif method == "eg_mhcd_ae":
         print("\n[2/5] 正在初始化 EG-CD 多候选生成器与 EntroGraph AE 裁决官...")
@@ -295,6 +312,7 @@ def main():
             topk_plausible=args.topk_plausible,
             neg_type=args.neg_type,
             neg_std=args.neg_std,
+            perturb_seed_base=perturb_seed_base,
         )
         scorer = EGAnswerEntropyScorer(device="cuda")
     elif method == "sample_majority":
@@ -312,7 +330,10 @@ def main():
     # 步骤 3：接入评测数据
     # ---------------------------------------------------------
     print("\n[3/5] 正在挂载评测数据集 (准备锁页内存传输)...")
-    real_dataset = load_dataset_from_path(args.dataset, args.coco_image_root)
+    real_dataset = load_dataset_from_path(args.dataset, args.coco_image_root, split=args.split)
+    if args.limit is not None:
+        real_dataset = real_dataset[: args.limit]
+        print(f"🐞 Debug limit 启用：仅运行前 {len(real_dataset)} 条样本。")
     print(f"✅ 成功从 {args.dataset} 加载了 {len(real_dataset)} 笔测试数据。")
     
     # 高吞吐 DataLoader, Batch Size 设为 1（直接传入 List，无需额外类型转换）
@@ -343,7 +364,7 @@ def main():
                     "JS_label": score_result.get("JS_label"),
                     "alpha": score_result.get("alpha"),
                     "risk": score_result.get("risk"),
-                    "neg_type": args.neg_type,
+                    "neg_type": score_result.get("neg_type"),
                 }
             )
             final_report.append(report_item)
@@ -370,15 +391,22 @@ def main():
         trace_report.extend(generation_report)
         for item in generation_report:
             generation = item.get("generation", {})
+            generation_public = {key: value for key, value in generation.items() if key != "trace"}
             report_item = build_result_base(item, method, item.get("best_answer", generation.get("text", "")))
             report_item.update(
                 {
+                    "generation": generation_public,
                     "text": generation.get("text", item.get("best_answer", "")),
                     "token_ids": generation.get("token_ids", []),
+                    "H_pos": generation.get("H_pos"),
                     "H_cd": generation.get("H_cd"),
                     "D_vis": generation.get("D_vis"),
+                    "D_vis_norm": generation.get("D_vis_norm"),
+                    "risk_graph": generation.get("risk_graph"),
+                    "grounding_score": generation.get("grounding_score"),
                     "S_graph": generation.get("S_graph"),
                     "avg_logprob_cd": generation.get("avg_logprob_cd"),
+                    "config": generation.get("config"),
                 }
             )
             final_report.append(report_item)
@@ -438,9 +466,16 @@ def main():
                 rerank_mode = getattr(scorer, "last_mode", None)
             
             report_item = build_result_base(item, method, best_ans)
+            if method == "eg_mhcd_ae":
+                public_candidates = [
+                    {key: value for key, value in cand.items() if key != "trace"}
+                    for cand in candidates
+                ]
+            else:
+                public_candidates = [cand["text"] for cand in candidates]
             report_item.update(
                 {
-                    "all_candidates": [cand["text"] for cand in candidates],
+                    "all_candidates": public_candidates,
                     "ae_scores": ae_scores,
                     "clusters": clusters,
                     "mode": rerank_mode,
@@ -456,6 +491,7 @@ def main():
                         "candidate_scores": candidate_scores,
                         "risk_high": risk_high,
                         "final_scores": final_scores,
+                        "embedding_mode": getattr(rerank_result, "embedding_mode", None),
                     }
                 )
             final_report.append(report_item)

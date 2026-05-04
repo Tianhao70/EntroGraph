@@ -58,11 +58,16 @@ def build_qwen_text_messages(question: str) -> list[dict[str, Any]]:
     ]
 
 
-def build_text_only_inputs(processor, raw_item: dict[str, Any], device: torch.device | str) -> dict[str, Any]:
-    messages = build_qwen_text_messages(raw_item["question"])
+def build_text_only_inputs_from_question(processor, question: str, device: torch.device | str | None = None) -> dict[str, Any]:
+    messages = build_qwen_text_messages(question)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = processor(text=[text], images=None, videos=None, padding=True, return_tensors="pt")
-    return move_inputs_to_device(dict(inputs), device)
+    inputs = dict(inputs)
+    return move_inputs_to_device(inputs, device) if device is not None else inputs
+
+
+def build_text_only_inputs(processor, raw_item: dict[str, Any], device: torch.device | str) -> dict[str, Any]:
+    return build_text_only_inputs_from_question(processor, raw_item["question"], device)
 
 
 class Qwen25VLAdapter:
@@ -101,6 +106,9 @@ class Qwen25VLAdapter:
             }
         ]
         return self._build_inputs_from_messages(messages)
+
+    def build_text_inputs(self, question: str) -> Dict[str, Any]:
+        return build_text_only_inputs_from_question(self.processor, question)
 
     def _build_inputs_from_messages(self, messages: list[dict[str, Any]]) -> Dict[str, Any]:
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)

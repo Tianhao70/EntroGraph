@@ -7,7 +7,7 @@ from PIL import Image
 
 from src.decoding.token_cd import contrastive_generate, token_cd_result_to_dict
 from src.models.qwen25vl_adapter import Qwen25VLAdapter, clone_inputs, move_inputs_to_device
-from src.perturbations.image_perturb import perturb_image_pil
+from src.perturbations.image_perturb import perturb_image_pil, stable_sample_seed
 
 
 class ContrastiveCandidateGenerator:
@@ -30,6 +30,7 @@ class ContrastiveCandidateGenerator:
         neg_type: str = "gaussian",
         neg_std: float = 0.2,
         device: str = "cuda",
+        perturb_seed_base: int | None = None,
     ):
         if adapter is None and processor is None and hasattr(model, "build_inputs"):
             adapter = model
@@ -49,16 +50,35 @@ class ContrastiveCandidateGenerator:
         self.topk_plausible = topk_plausible
         self.neg_type = neg_type
         self.neg_std = neg_std
+        self.perturb_seed_base = perturb_seed_base
 
-    def generate(self, image_path: str, question: str, num_candidates: int = 5) -> List[Dict]:
+    def generate(
+        self,
+        image_path: str,
+        question: str,
+        num_candidates: int = 5,
+        raw_item: dict[str, Any] | None = None,
+        perturb_seed: int | None = None,
+    ) -> List[Dict]:
         """
         For each path, call token_cd.contrastive_generate.
         Return candidate text + trace metrics.
         """
         inputs_pos = self.adapter.move_to_device(self.adapter.build_inputs(image_path, question))
-        with Image.open(image_path) as image:
-            neg_image = perturb_image_pil(image.convert("RGB"), mode=self.neg_type, std=self.neg_std)
-        inputs_neg = self.adapter.move_to_device(self.adapter.build_inputs_from_pil(neg_image, question))
+        if perturb_seed is None and raw_item is not None:
+            perturb_seed = stable_sample_seed(self.perturb_seed_base, raw_item)
+
+        if self.neg_type == "text_only":
+            inputs_neg = self.adapter.move_to_device(self.adapter.build_text_inputs(question))
+        else:
+            with Image.open(image_path) as image:
+                neg_image = perturb_image_pil(
+                    image.convert("RGB"),
+                    mode=self.neg_type,
+                    std=self.neg_std,
+                    seed=perturb_seed,
+                )
+            inputs_neg = self.adapter.move_to_device(self.adapter.build_inputs_from_pil(neg_image, question))
 
         candidates: list[dict[str, Any]] = []
         for path_id, config in enumerate(self.path_configs[:num_candidates]):
@@ -109,6 +129,7 @@ class EGMHCDGenerator:
         topk_plausible: int = 50,
         neg_type: str = "gaussian",
         neg_std: float = 0.2,
+        perturb_seed_base: int | None = None,
     ):
         self.num_candidates = num_candidates
         self.generator = ContrastiveCandidateGenerator(
@@ -119,6 +140,7 @@ class EGMHCDGenerator:
             topk_plausible=topk_plausible,
             neg_type=neg_type,
             neg_std=neg_std,
+            perturb_seed_base=perturb_seed_base,
         )
         self.path_configs = self.generator.path_configs[:num_candidates]
 
@@ -126,15 +148,15 @@ class EGMHCDGenerator:
         all_results = []
         for batch_inputs, raw_items in dataloader:
             raw_item = raw_items[0]
-            for path_id, config in enumerate(self.path_configs):
-                print(
-                    f"正在生成 EG-CD 路径 {path_id + 1}/{len(self.path_configs)} "
-                    f"(β={config['beta']}, T={config['temperature']})..."
-                )
+            print(
+                f"正在为样本生成 {self.num_candidates} 条 EG-CD 候选: "
+                f"{raw_item.get('question_id', raw_item.get('image_name', 'unknown'))}"
+            )
             batch_candidates = self.generator.generate(
                 raw_item["image_path"],
                 raw_item["question"],
                 num_candidates=self.num_candidates,
+                raw_item=raw_item,
             )
 
             result_item = {

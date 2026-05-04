@@ -44,6 +44,16 @@ class ImagePerturbTest(unittest.TestCase):
 
         self.assertTrue(np.array_equal(np.asarray(out), np.asarray(image)))
 
+    def test_gaussian_seed_is_reproducible(self):
+        image = self.make_image(mode="RGB")
+
+        out_a = perturb_image_pil(image, mode="gaussian", std=0.2, seed=123)
+        out_b = perturb_image_pil(image, mode="gaussian", std=0.2, seed=123)
+        out_c = perturb_image_pil(image, mode="gaussian", std=0.2, seed=456)
+
+        self.assertTrue(np.array_equal(np.asarray(out_a), np.asarray(out_b)))
+        self.assertFalse(np.array_equal(np.asarray(out_a), np.asarray(out_c)))
+
     def test_gray_output_has_equal_channels(self):
         image = self.make_image(mode="RGB")
 

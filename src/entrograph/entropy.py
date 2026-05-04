@@ -93,6 +93,42 @@ def topk_plausibility_mask(logits_pos: torch.Tensor, logits_cd: torch.Tensor, k:
     return logits_cd.masked_fill(~allowed, masked_value)
 
 
+def normalised_entropy_from_masked_logits(
+    masked_logits: torch.Tensor,
+    temperature: float = 1.0,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Compute entropy over unmasked logits and normalise by log(num_allowed).
+
+    topk_plausibility_mask uses the finite dtype floor as its masked value for
+    backward compatibility, so this helper treats values near that floor as
+    masked in addition to non-finite values.
+    """
+    torch = _torch()
+    if temperature <= 0:
+        raise ValueError("temperature must be > 0")
+    if masked_logits.ndim == 0:
+        raise ValueError("masked_logits must have at least one dimension")
+
+    logits = _sanitize_logits(masked_logits.float())
+    allowed = torch.isfinite(masked_logits)
+    if torch.is_floating_point(masked_logits):
+        floor = torch.finfo(masked_logits.dtype).min
+        allowed = allowed & (masked_logits > floor / 2.0)
+
+    num_allowed = allowed.sum(dim=-1)
+    softmax_logits = logits.masked_fill(~allowed, float("-inf"))
+    probs = safe_softmax(softmax_logits, temperature=temperature).masked_fill(~allowed, 0.0)
+    denom = probs.sum(dim=-1, keepdim=True).clamp_min(eps)
+    probs = probs / denom
+    entropy = -(probs * probs.clamp_min(eps).log()).sum(dim=-1)
+    normaliser = torch.log(num_allowed.clamp_min(1).float()).clamp_min(eps)
+    normalised = entropy / normaliser
+    normalised = torch.where(num_allowed > 1, normalised, torch.zeros_like(normalised))
+    return torch.nan_to_num(normalised, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+
+
 def safe_softmax(logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
     """Softmax over the last dimension with finite output for pathological logits."""
     torch = _torch()

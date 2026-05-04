@@ -11,6 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local ML env
 from src.entrograph.entropy import (
     entropy_from_probs,
     js_div,
+    normalised_entropy_from_masked_logits,
     safe_softmax,
     topk_plausibility_mask,
 )
@@ -91,6 +92,15 @@ class EntropyUtilsTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(probs).all())
         self.assertTrue(torch.allclose(probs.sum(dim=-1), torch.ones(3), atol=1e-6))
         self.assertTrue(torch.allclose(probs[1], torch.tensor([0.5, 0.5]), atol=1e-6))
+
+    def test_normalised_entropy_from_masked_logits_ignores_mask_floor(self):
+        floor = torch.finfo(torch.float32).min
+        logits = torch.tensor([[0.0, 0.0, floor, floor], [10.0, -10.0, floor, floor]], dtype=torch.float32)
+
+        entropy = normalised_entropy_from_masked_logits(logits)
+
+        self.assertAlmostEqual(float(entropy[0]), 1.0, places=5)
+        self.assertLess(float(entropy[1]), 1e-3)
 
 
 if __name__ == "__main__":

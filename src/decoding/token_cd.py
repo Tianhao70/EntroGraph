@@ -6,14 +6,22 @@ from typing import Any, List, Tuple
 
 import torch
 
-from src.entrograph.entropy import entropy_from_probs, js_div, safe_softmax, topk_plausibility_mask
+from src.entrograph.entropy import (
+    entropy_from_probs,
+    js_div,
+    normalised_entropy_from_masked_logits,
+    safe_softmax,
+    topk_plausibility_mask,
+)
 from src.models.qwen25vl_adapter import (
+    Qwen25VLAdapter,
     append_token_batch,
     build_text_only_inputs,
     clone_inputs,
     get_tokenizer,
     move_inputs_to_device,
 )
+from src.perturbations.image_perturb import perturb_image_pil, stable_sample_seed
 
 
 @dataclass
@@ -22,7 +30,10 @@ class StepTrace:
     token_id: int
     token_text: str
     H_t: float
+    H_pos_t: float
+    H_cd_t: float
     JS_t: float
+    JS_norm_t: float
     alpha_t: float
     topk_pos: List[Tuple[str, float]]
     topk_cd: List[Tuple[str, float]]
@@ -32,8 +43,12 @@ class StepTrace:
 class TokenCDResult:
     text: str
     token_ids: List[int]
+    H_pos: float
     H_cd: float
     D_vis: float
+    D_vis_norm: float
+    risk_graph: float
+    grounding_score: float
     S_graph: float
     avg_logprob_cd: float
     trace: List[StepTrace]
@@ -51,6 +66,9 @@ class TokenCDConfig:
     alpha0: float = 0.5
     k_entropy: float = 0.8
     alpha_max: float = 2.0
+    neg_type: str = "gaussian"
+    neg_std: float = 0.2
+    perturb_seed_base: int | None = None
 
 
 def contrastive_logits(
@@ -132,8 +150,10 @@ def contrastive_generate(
     token_ids: list[int] = []
     trace: list[StepTrace] = []
     selected_logprobs: list[float] = []
-    h_values: list[float] = []
+    h_pos_values: list[float] = []
+    h_cd_values: list[float] = []
     js_values: list[float] = []
+    js_norm_values: list[float] = []
 
     for t in range(max_new_tokens):
         logits_pos = model(**inputs_pos).logits[:, -1, :].float()
@@ -141,40 +161,49 @@ def contrastive_generate(
 
         p_pos = safe_softmax(logits_pos, temperature=temperature)
         p_neg = safe_softmax(logits_neg, temperature=temperature)
-        h_t = entropy_from_probs(p_pos)
+        h_pos_t = entropy_from_probs(p_pos)
         js_t = js_div(p_pos, p_neg)
 
-        h_scalar = float(h_t.reshape(-1)[0].item())
+        h_pos_scalar = float(h_pos_t.reshape(-1)[0].item())
         js_scalar = float(js_t.reshape(-1)[0].item())
+        js_norm_scalar = min(max(js_scalar / math.log(2), 0.0), 1.0)
         if dynamic_alpha:
             vocab_size = max(int(logits_pos.shape[-1]), 2)
-            h_norm = min(max(h_scalar / math.log(vocab_size), 0.0), 1.0)
+            h_norm = min(max(h_pos_scalar / math.log(vocab_size), 0.0), 1.0)
             alpha_t = min(max(float(alpha0) + float(k_entropy) * h_norm, 0.0), float(alpha_max))
         else:
             alpha_t = float(beta)
 
         logits_cd = (1.0 + alpha_t) * logits_pos - alpha_t * logits_neg
-        logits_cd = topk_plausibility_mask(logits_pos, logits_cd, topk_plausible)
+        logits_cd_masked = topk_plausibility_mask(logits_pos, logits_cd, topk_plausible)
+        h_cd_t = normalised_entropy_from_masked_logits(logits_cd_masked, temperature=temperature)
+        h_cd_scalar = float(h_cd_t.reshape(-1)[0].item())
 
-        sample_logits = top_k_top_p_filtering(logits_cd, top_p=top_p)
-        p_cd = safe_softmax(sample_logits, temperature=temperature)
-        next_token = torch.multinomial(p_cd, num_samples=1) if 0 < top_p < 1.0 else torch.argmax(p_cd, dim=-1, keepdim=True)
+        p_cd = safe_softmax(logits_cd_masked, temperature=temperature)
+        sample_logits = top_k_top_p_filtering(logits_cd_masked, top_p=top_p)
+        p_sample = safe_softmax(sample_logits, temperature=temperature)
+        next_token = torch.multinomial(p_sample, num_samples=1) if 0 < top_p < 1.0 else torch.argmax(p_sample, dim=-1, keepdim=True)
         token_id = int(next_token.reshape(-1)[0].item())
         token_text = _decode_token(tokenizer, token_id)
 
         token_ids.append(token_id)
-        selected_logprob = float(torch.log(p_cd[0, token_id].clamp_min(1e-12)).item())
+        selected_logprob = float(torch.log(p_sample[0, token_id].clamp_min(1e-12)).item())
         selected_logprobs.append(selected_logprob)
-        h_values.append(h_scalar)
+        h_pos_values.append(h_pos_scalar)
+        h_cd_values.append(h_cd_scalar)
         js_values.append(js_scalar)
+        js_norm_values.append(js_norm_scalar)
 
         trace.append(
             StepTrace(
                 t=t,
                 token_id=token_id,
                 token_text=token_text,
-                H_t=h_scalar,
+                H_t=h_pos_scalar,
+                H_pos_t=h_pos_scalar,
+                H_cd_t=h_cd_scalar,
                 JS_t=js_scalar,
+                JS_norm_t=js_norm_scalar,
                 alpha_t=alpha_t,
                 topk_pos=_topk_trace(tokenizer, p_pos, k=5),
                 topk_cd=_topk_trace(tokenizer, p_cd, k=5),
@@ -188,16 +217,24 @@ def contrastive_generate(
         if token_id in eos_token_ids:
             break
 
-    h_cd = _mean(h_values)
+    h_pos = _mean(h_pos_values)
+    h_cd = _mean(h_cd_values)
     d_vis = _mean(js_values)
+    d_vis_norm = _mean(js_norm_values)
+    risk_graph = h_cd - d_vis_norm
+    grounding_score = d_vis_norm - h_cd
     avg_logprob_cd = _mean(selected_logprobs)
     text = _decode_sequence(tokenizer, token_ids)
     return TokenCDResult(
         text=text,
         token_ids=token_ids,
+        H_pos=h_pos,
         H_cd=h_cd,
         D_vis=d_vis,
-        S_graph=d_vis - h_cd,
+        D_vis_norm=d_vis_norm,
+        risk_graph=risk_graph,
+        grounding_score=grounding_score,
+        S_graph=risk_graph,
         avg_logprob_cd=avg_logprob_cd,
         trace=trace,
     )
@@ -218,7 +255,13 @@ class TokenContrastiveDecoder:
     ) -> dict[str, Any]:
         device = batch_inputs["input_ids"].device
         positive_inputs = clone_inputs(batch_inputs)
-        negative_inputs = build_text_only_inputs(self.processor, raw_item, device)
+        negative_inputs = self.build_negative_inputs(
+            raw_item,
+            device=device,
+            neg_type=config.neg_type,
+            neg_std=config.neg_std,
+            perturb_seed_base=config.perturb_seed_base,
+        )
         result = contrastive_generate(
             self.model,
             self.processor,
@@ -239,6 +282,32 @@ class TokenContrastiveDecoder:
         payload["config"] = asdict(config)
         return payload
 
+    def build_negative_inputs(
+        self,
+        raw_item,
+        device,
+        neg_type: str,
+        neg_std: float,
+        perturb_seed_base: int | None = None,
+    ):
+        if neg_type == "text_only":
+            return build_text_only_inputs(self.processor, raw_item, device)
+
+        from PIL import Image
+
+        adapter = Qwen25VLAdapter(self.model, self.processor, device=device)
+        perturb_seed = stable_sample_seed(perturb_seed_base, raw_item)
+
+        with Image.open(raw_item["image_path"]) as image:
+            neg_image = perturb_image_pil(
+                image.convert("RGB"),
+                mode=neg_type,
+                std=neg_std,
+                seed=perturb_seed,
+            )
+
+        return adapter.move_to_device(adapter.build_inputs_from_pil(neg_image, raw_item["question"]))
+
 
 class TokenCDGenerator:
     def __init__(
@@ -255,6 +324,9 @@ class TokenCDGenerator:
         alpha0: float = 0.5,
         k_entropy: float = 0.8,
         alpha_max: float = 2.0,
+        neg_type: str = "gaussian",
+        neg_std: float = 0.2,
+        perturb_seed_base: int | None = None,
     ):
         self.decoder = TokenContrastiveDecoder(model, processor)
         self.config = TokenCDConfig(
@@ -268,6 +340,9 @@ class TokenCDGenerator:
             alpha0=alpha0,
             k_entropy=k_entropy,
             alpha_max=alpha_max,
+            neg_type=neg_type,
+            neg_std=neg_std,
+            perturb_seed_base=perturb_seed_base,
         )
 
     def generate(self, dataloader):
@@ -293,8 +368,12 @@ def token_cd_result_to_dict(result: TokenCDResult) -> dict[str, Any]:
     return {
         "text": result.text,
         "token_ids": result.token_ids,
+        "H_pos": result.H_pos,
         "H_cd": result.H_cd,
         "D_vis": result.D_vis,
+        "D_vis_norm": result.D_vis_norm,
+        "risk_graph": result.risk_graph,
+        "grounding_score": result.grounding_score,
         "S_graph": result.S_graph,
         "avg_logprob_cd": result.avg_logprob_cd,
         "mean_cd_logprob": result.avg_logprob_cd,

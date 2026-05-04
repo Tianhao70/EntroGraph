@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 from qwen_vl_utils import process_vision_info
@@ -58,22 +60,27 @@ def qwen_collate_fn(batch, processor):
     )
     return inputs, raw_items
 
-def build_high_throughput_dataloader(data_list, processor, batch_size=1):
+def build_high_throughput_dataloader(data_list, processor, batch_size=1, num_workers=None):
     """
     核心武器：48GB 内存锁页预抓取 DataLoader
     """
     dataset = QwenEvalDataset(data_list, processor)
-    
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=8,           # 召唤 8 个 CPU 进程后台疯狂读图
-        pin_memory=True,         # 开启 DMA 高速通道，直接把内存映射到 5090 显存
-        collate_fn=lambda b: qwen_collate_fn(b, processor),
-        drop_last=False,
-        prefetch_factor=2        # 每个 worker 提前预取 2 个 batch
-    )
+
+    if num_workers is None:
+        num_workers = int(os.environ.get("QWEN_DATALOADER_WORKERS", "0"))
+
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "collate_fn": lambda b: qwen_collate_fn(b, processor),
+        "drop_last": False,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = 2
+
+    dataloader = DataLoader(dataset, **loader_kwargs)
     return dataloader
 
 if __name__ == "__main__":

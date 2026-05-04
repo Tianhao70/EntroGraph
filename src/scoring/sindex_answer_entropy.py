@@ -22,7 +22,13 @@ class CandidateScore:
     H_mem: float
     H_local: float
     H_cd: float
+    D_vis: float
+    D_vis_norm: float
     H_vis: float
+    H_vis_abs: float
+    H_vis_rel: float
+    avg_logprob_cd: float
+    avg_logprob_norm: float
     AE: float
     final_score: float
 
@@ -38,6 +44,7 @@ class RerankResult:
     clusters: List[int]
     mode: str
     risk_high: bool = False
+    embedding_mode: str = "question_answer"
 
 
 def extract_yes_no(text):
@@ -266,6 +273,7 @@ class EGAnswerEntropyScorer:
         self.last_final_scores = None
         self.last_delta_ae = None
         self.last_risk_high = None
+        self.last_embedding_mode = None
 
     def score_and_select(self, question: str, candidates: List[Dict]) -> RerankResult:
         texts, metadata = normalise_candidates(candidates)
@@ -302,11 +310,14 @@ class EGAnswerEntropyScorer:
 
         import numpy as np
 
-        _ = question
         eps = 1e-12
         rho_min = 1e-3
         k = len(texts)
-        embeddings = self._encode_texts(texts)
+        embedding_texts = [
+            f"{question.strip()} [SEP] {answer.strip()}"
+            for answer in texts
+        ]
+        embeddings = self._encode_texts(embedding_texts)
         cosine = np.clip(embeddings @ embeddings.T, -1.0, 1.0)
         distance = np.clip(1.0 - cosine, 0.0, 2.0)
         clusters = self._cluster_average_linkage(distance, self.distance_threshold)
@@ -354,9 +365,18 @@ class EGAnswerEntropyScorer:
             h_cluster = self._clamp(h_cluster, 0.0, 1.0)
 
         h_cd = np.asarray([self._finite_float(item.get("H_cd", 0.0), 0.0) for item in metadata], dtype=float)
-        h_cd = np.maximum(h_cd, 0.0)
+        h_cd = np.clip(h_cd, 0.0, 1.0)
         d_vis = np.asarray([self._finite_float(item.get("D_vis", 0.0), 0.0) for item in metadata], dtype=float)
-        h_vis = 1.0 - self._minmax(d_vis)
+        d_vis_norm = np.asarray(
+            [
+                self._finite_float(item.get("D_vis_norm", d_vis[i] / math.log(2.0)), 0.0)
+                for i, item in enumerate(metadata)
+            ],
+            dtype=float,
+        )
+        d_vis_norm = np.clip(d_vis_norm, 0.0, 1.0)
+        h_vis_abs = 1.0 - d_vis_norm
+        h_vis_rel = 1.0 - self._minmax(d_vis)
         avg_logprob = np.asarray(
             [
                 self._finite_float(item.get("avg_logprob_cd", item.get("mean_cd_logprob", 0.0)), 0.0)
@@ -364,8 +384,9 @@ class EGAnswerEntropyScorer:
             ],
             dtype=float,
         )
+        avg_logprob_norm = np.asarray(normalise_scores(avg_logprob, default=0.5), dtype=float)
 
-        ae = 0.30 * h_mem + 0.20 * h_local + 0.25 * h_cd + 0.25 * h_vis
+        ae = 0.30 * h_mem + 0.20 * h_local + 0.25 * h_cd + 0.25 * h_vis_abs
         i_plus = int(np.argmin(ae))
         i_minus = int(np.argmax(ae))
         delta_ae = float(ae[i_minus] - ae[i_plus])
@@ -374,7 +395,7 @@ class EGAnswerEntropyScorer:
         for i in range(k):
             cos_to_plus = float(cosine[i, i_plus])
             cos_to_minus = float(cosine[i, i_minus])
-            final_scores[i] = -ae[i] + self.gamma * (cos_to_plus - cos_to_minus) + self.mu * avg_logprob[i]
+            final_scores[i] = -ae[i] + self.gamma * (cos_to_plus - cos_to_minus) + self.mu * avg_logprob_norm[i]
 
         risk_high = False
         if m == 1 or h_cluster < 0.25:
@@ -395,7 +416,13 @@ class EGAnswerEntropyScorer:
                 H_mem=float(h_mem[i]),
                 H_local=float(h_local[i]),
                 H_cd=float(h_cd[i]),
-                H_vis=float(h_vis[i]),
+                D_vis=float(d_vis[i]),
+                D_vis_norm=float(d_vis_norm[i]),
+                H_vis=float(h_vis_abs[i]),
+                H_vis_abs=float(h_vis_abs[i]),
+                H_vis_rel=float(h_vis_rel[i]),
+                avg_logprob_cd=float(avg_logprob[i]),
+                avg_logprob_norm=float(avg_logprob_norm[i]),
                 AE=float(ae[i]),
                 final_score=float(final_scores[i]),
             )
@@ -411,6 +438,7 @@ class EGAnswerEntropyScorer:
             clusters=[int(cluster_id) for cluster_id in clusters.tolist()],
             mode=mode,
             risk_high=risk_high,
+            embedding_mode="question_answer",
         )
         self._record_result(result, metadata, cluster_masses)
         return result
@@ -535,6 +563,7 @@ class EGAnswerEntropyScorer:
         self.last_final_scores = [score.final_score for score in result.scores]
         self.last_delta_ae = result.delta_AE
         self.last_risk_high = result.risk_high
+        self.last_embedding_mode = result.embedding_mode
 
 
 EntroGraphAnswerEntropyScorer = EGAnswerEntropyScorer

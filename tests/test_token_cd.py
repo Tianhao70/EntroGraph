@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
-from src.decoding.token_cd import StepTrace, TokenCDResult, contrastive_generate
+from src.decoding.token_cd import StepTrace, TokenCDConfig, TokenCDResult, TokenContrastiveDecoder, contrastive_generate
 
 
 class FakeTokenizer:
@@ -162,6 +162,40 @@ class TokenCDTest(unittest.TestCase):
 
         # Only token A is in the positive top-1 set, so CD cannot choose B.
         self.assertEqual(result.token_ids, [3])
+
+    def test_generate_one_records_negative_branch_config(self):
+        model = FakeCDModel()
+        tokenizer = FakeTokenizer()
+        decoder = TokenContrastiveDecoder(model, tokenizer)
+        captured = {}
+
+        def fake_negative(raw_item, device, neg_type, neg_std, perturb_seed_base=None):
+            captured["neg_type"] = neg_type
+            captured["neg_std"] = neg_std
+            captured["perturb_seed_base"] = perturb_seed_base
+            return self.make_inputs("neg")
+
+        decoder.build_negative_inputs = fake_negative
+        config = TokenCDConfig(
+            max_new_tokens=1,
+            beta=0.5,
+            top_k=3,
+            neg_type="gaussian",
+            neg_std=0.2,
+            perturb_seed_base=42,
+        )
+
+        result = decoder.generate_one(
+            self.make_inputs("pos"),
+            {"question": "Question?", "image_path": "/tmp/sample.jpg"},
+            config,
+        )
+
+        self.assertEqual(captured["neg_type"], "gaussian")
+        self.assertEqual(captured["neg_std"], 0.2)
+        self.assertEqual(captured["perturb_seed_base"], 42)
+        self.assertEqual(result["config"]["neg_type"], "gaussian")
+        self.assertEqual(result["config"]["neg_std"], 0.2)
 
 
 if __name__ == "__main__":

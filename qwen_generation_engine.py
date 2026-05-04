@@ -5,7 +5,7 @@ New code should import from src.decoding.* and src.models.* directly.
 """
 
 from src.decoding.candidate_generator import ContrastiveCandidateGenerator, EGMHCDGenerator, SampleMajorityGenerator
-from src.decoding.label_cd import EGLabelCDScorer, EntroGraphLabelCD, LabelCDResult
+from src.decoding.label_cd import EGLabelCDScorer, EntroGraphLabelCD, LabelCDResult, LabelPositiveScorer
 from src.decoding.token_cd import (
     StepTrace,
     TokenCDConfig,
@@ -34,6 +34,7 @@ __all__ = [
     "EntroGraphLabelCD",
     "EGMHCDGenerator",
     "LabelCDResult",
+    "LabelPositiveScorer",
     "MHCDGenerator",
     "SampleMajorityGenerator",
     "StepTrace",

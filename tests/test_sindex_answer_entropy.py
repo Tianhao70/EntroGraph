@@ -26,9 +26,9 @@ class EGAnswerEntropyScorerTest(unittest.TestCase):
         scorer = EGAnswerEntropyScorer(device="cpu", distance_threshold=0.15, tau=0.1)
         scorer.encoder = FakeEncoder(
             {
-                "red apple": [1.0, 0.0, 0.0],
-                "red fruit": [0.99, 0.10, 0.0],
-                "blue car": [0.0, 1.0, 0.0],
+                "What is shown? [SEP] red apple": [1.0, 0.0, 0.0],
+                "What is shown? [SEP] red fruit": [0.99, 0.10, 0.0],
+                "What is shown? [SEP] blue car": [0.0, 1.0, 0.0],
             }
         )
         candidates = [
@@ -49,7 +49,11 @@ class EGAnswerEntropyScorerTest(unittest.TestCase):
         self.assertEqual(len(result.scores), 3)
         self.assertIsInstance(result.scores[0], CandidateScore)
         self.assertAlmostEqual(result.scores[0].H_vis, 0.0)
-        self.assertAlmostEqual(result.scores[1].H_vis, 1.0)
+        self.assertAlmostEqual(result.scores[1].H_vis, 1.0 - (0.1 / np.log(2.0)))
+        self.assertAlmostEqual(result.scores[0].avg_logprob_cd, -0.1)
+        self.assertAlmostEqual(result.scores[0].avg_logprob_norm, 1.0)
+        self.assertAlmostEqual(result.scores[1].avg_logprob_norm, 0.0)
+        self.assertEqual(result.embedding_mode, "question_answer")
         self.assertEqual(scorer.last_mode, result.mode)
         self.assertEqual(scorer.last_ae_scores, [score.AE for score in result.scores])
 
@@ -57,9 +61,9 @@ class EGAnswerEntropyScorerTest(unittest.TestCase):
         scorer = EGAnswerEntropyScorer(device="cpu", distance_threshold=0.05, tau=0.1)
         scorer.encoder = FakeEncoder(
             {
-                "alpha": [1.0, 0.0, 0.0],
-                "beta": [0.0, 1.0, 0.0],
-                "gamma": [0.0, 0.0, 1.0],
+                "Pick one. [SEP] alpha": [1.0, 0.0, 0.0],
+                "Pick one. [SEP] beta": [0.0, 1.0, 0.0],
+                "Pick one. [SEP] gamma": [0.0, 0.0, 1.0],
             }
         )
         candidates = [

@@ -8,8 +8,8 @@ import torch
 from PIL import Image
 
 from src.entrograph.entropy import entropy_from_probs, js_div, safe_softmax
-from src.models.qwen25vl_adapter import Qwen25VLAdapter
-from src.perturbations.image_perturb import perturb_image_pil
+from src.models.qwen25vl_adapter import Qwen25VLAdapter, build_text_only_inputs_from_question
+from src.perturbations.image_perturb import perturb_image_pil, stable_sample_seed
 
 
 LABEL_TEXT_VARIANTS = {
@@ -54,14 +54,22 @@ class EntroGraphLabelCD:
         self.neg_std = float(neg_std)
 
     @torch.no_grad()
-    def predict(self, image_path: str, question: str) -> LabelCDResult:
+    def predict(self, image_path: str, question: str, perturb_seed: int | None = None) -> LabelCDResult:
         positive_inputs = self.adapter.move_to_device(self.adapter.build_inputs(image_path, question))
 
-        image = Image.open(image_path).convert("RGB")
-        negative_image = perturb_image_pil(image, mode=self.neg_type, std=self.neg_std)
-        negative_inputs = self.adapter.move_to_device(
-            self.adapter.build_inputs_from_pil(negative_image, question)
-        )
+        if self.neg_type == "text_only":
+            negative_inputs = self._build_text_only_negative(question)
+        else:
+            with Image.open(image_path) as image:
+                negative_image = perturb_image_pil(
+                    image.convert("RGB"),
+                    mode=self.neg_type,
+                    std=self.neg_std,
+                    seed=perturb_seed,
+                )
+            negative_inputs = self.adapter.move_to_device(
+                self.adapter.build_inputs_from_pil(negative_image, question)
+            )
 
         scores_pos_t = self._score_labels(positive_inputs)
         scores_neg_t = self._score_labels(negative_inputs)
@@ -102,6 +110,17 @@ class EntroGraphLabelCD:
             for label in LABELS
         }
 
+    def _build_text_only_negative(self, question: str):
+        if hasattr(self.adapter, "build_text_inputs"):
+            return self.adapter.move_to_device(self.adapter.build_text_inputs(question))
+        if hasattr(self.adapter, "processor") and hasattr(self.adapter, "device"):
+            return build_text_only_inputs_from_question(
+                self.adapter.processor,
+                question,
+                self.adapter.device,
+            )
+        raise ValueError("text_only negative branch requires a Qwen25VLAdapter-compatible adapter.")
+
     def _score_label_variants(self, inputs, variants: tuple[str, ...]) -> torch.Tensor:
         scores = [self.adapter.sequence_logprob(inputs, variant).float() for variant in variants]
         return torch.logsumexp(torch.stack(scores, dim=0), dim=0)
@@ -134,11 +153,13 @@ class EGLabelCDScorer:
         neg_type: str = "gaussian",
         neg_std: float = 0.2,
         device: str = "cuda",
+        perturb_seed_base: int | None = None,
     ):
         if tuple(labels) != LABELS:
             raise ValueError("EGLabelCDScorer currently supports yes/no labels only.")
         self.temperature = temperature
         self.adapter = Qwen25VLAdapter(model, processor, device=device)
+        self.perturb_seed_base = perturb_seed_base
         self.engine = EntroGraphLabelCD(
             self.adapter,
             alpha0=beta,
@@ -150,7 +171,8 @@ class EGLabelCDScorer:
         )
 
     def score(self, batch_inputs, raw_item) -> dict:
-        result = self.engine.predict(raw_item["image_path"], raw_item["question"])
+        perturb_seed = stable_sample_seed(self.perturb_seed_base, raw_item)
+        result = self.engine.predict(raw_item["image_path"], raw_item["question"], perturb_seed=perturb_seed)
         cd_probs = self._softmax_dict(result.scores_cd)
         sorted_cd = sorted(result.scores_cd.values(), reverse=True)
         payload = {
@@ -180,3 +202,60 @@ class EGLabelCDScorer:
         values = torch.tensor([scores[label] for label in LABELS], dtype=torch.float32)
         probs = safe_softmax(values)
         return {label: float(probs[i].item()) for i, label in enumerate(LABELS)}
+
+
+class LabelPositiveScorer:
+    """
+    Positive-only POPE yes/no scorer for the label_pos baseline.
+    """
+
+    def __init__(
+        self,
+        model,
+        processor,
+        temperature: float = 1.0,
+        device: str = "cuda",
+    ):
+        self.temperature = temperature
+        self.adapter = Qwen25VLAdapter(model, processor, device=device)
+
+    @torch.no_grad()
+    def score(self, batch_inputs, raw_item) -> dict:
+        inputs = self.adapter.move_to_device(
+            self.adapter.build_inputs(raw_item["image_path"], raw_item["question"])
+        )
+        scores_t = {
+            label: self._score_label_variants(inputs, LABEL_TEXT_VARIANTS[label])
+            for label in LABELS
+        }
+        pos_vec = torch.stack([scores_t[label] for label in LABELS], dim=-1)
+        p_pos_vec = safe_softmax(pos_vec)
+        h_label = float(entropy_from_probs(p_pos_vec).reshape(-1)[0].item())
+        scores_pos = EntroGraphLabelCD._tensor_label_dict(scores_t)
+        label_probs = EntroGraphLabelCD._vector_label_dict(p_pos_vec)
+        sorted_scores = sorted(scores_pos.values(), reverse=True)
+        pred = max(scores_pos, key=scores_pos.get)
+
+        return {
+            "best_answer": pred,
+            "positive_label_logprobs": scores_pos,
+            "negative_label_logprobs": None,
+            "cd_label_scores": dict(scores_pos),
+            "label_probs": label_probs,
+            "p_pos": label_probs,
+            "p_neg": None,
+            "label_margin": sorted_scores[0] - sorted_scores[1],
+            "answer_entropy": h_label,
+            "JS_label": None,
+            "sindex": None,
+            "beta": 0.0,
+            "alpha": 0.0,
+            "risk": h_label,
+            "neg_type": None,
+            "temperature": self.temperature,
+            "mode": "label_pos",
+        }
+
+    def _score_label_variants(self, inputs, variants: tuple[str, ...]) -> torch.Tensor:
+        scores = [self.adapter.sequence_logprob(inputs, variant).float() for variant in variants]
+        return torch.logsumexp(torch.stack(scores, dim=0), dim=0)
