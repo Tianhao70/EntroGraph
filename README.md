@@ -17,16 +17,22 @@ is under `src/` and `main.py`.
 
 ## Environment
 
-Use a Python environment with PyTorch, Transformers, Pillow, NumPy, and pytest.
-For Qwen2.5-VL runs, install the model dependencies recommended by the Qwen2.5-VL
-release, including `qwen-vl-utils`.
+Use a Python environment with PyTorch and the Qwen2.5-VL dependencies. The base
+requirements cover label-level scoring and token-level contrastive decoding;
+the ML requirements add the sentence embedding stack used by EG-MHCD-AE /
+SINDex reranking.
 
 ```bash
-pip install torch transformers pillow numpy pytest qwen-vl-utils
+pip install torch pytest
+pip install -r requirements.txt      # label-level / token_cd basic
+pip install -r requirements-ml.txt   # eg_mhcd_ae / SINDex rerank
 ```
 
 The repository does not patch `transformers` and does not modify the legacy
 `mods/` model code for EntroGraph experiments.
+
+`--temperature` currently affects `token_cd` / `eg_mhcd_ae` generation;
+label-level scoring uses raw label sequence logprob.
 
 ## Dataset layout
 

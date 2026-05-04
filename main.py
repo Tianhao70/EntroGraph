@@ -29,7 +29,7 @@ def seed_everything(seed: int):
 
 
 def default_max_new_tokens(method):
-    if method in ("greedy", "label_pos", "vcd_label_const", "eg_label_cd"):
+    if method in ("greedy", "label_pos", "vcd_label_const", "eg_label_cd", "sample_majority"):
         return 8
     return 128
 
@@ -216,7 +216,12 @@ def main():
     parser.add_argument("--topk-plausible", type=int, default=50)
     parser.add_argument("--num-candidates", type=int, default=5, help="eg_mhcd_ae 候选路径数")
     parser.add_argument("--trace-dir", type=str, default="outputs/traces", help="token trace 输出目录")
-    parser.add_argument("--temperature", type=float, default=1.0, help="token/label logits 温度")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="token_cd / eg_mhcd_ae generation 温度；label-level 使用原始 label sequence logprob",
+    )
     parser.add_argument("--top-p", type=float, default=0.9, help="token_cd / eg_mhcd_ae nucleus sampling top_p")
     args = parser.parse_args()
     method = args.method
