@@ -93,6 +93,106 @@ bash scripts/eval_pope_outputs.sh
 `eg_mhcd_ae` is intentionally kept out of the full POPE script until the debug
 20-sample run passes for the target environment.
 
+## Open-ended hallucination evaluation
+
+The open-ended pipeline is task-aware and keeps the existing POPE flow intact.
+Use `--task chair` for COCO caption hallucination and `--task mmhal` for
+MMHal-Bench response generation.
+
+### CHAIR / COCO caption
+
+Required files:
+
+```bash
+export COCO_IMAGE_ROOT=/path/to/coco/val2014
+export COCO_ANN_ROOT=/path/to/coco/annotations
+
+ls "$COCO_IMAGE_ROOT"/COCO_val2014_*.jpg
+ls "$COCO_ANN_ROOT"/instances_val2014.json
+ls "$COCO_ANN_ROOT"/captions_val2014.json
+```
+
+All CHAIR methods use the same prompt:
+
+```text
+Describe the image in one concise sentence. Mention only objects that are clearly visible.
+```
+
+Debug commands:
+
+```bash
+bash scripts/debug_chair_20.sh greedy
+bash scripts/debug_chair_20.sh token_cd
+bash scripts/debug_chair_20.sh eg_mhcd_ae
+```
+
+Run the 500-image CHAIR experiment and evaluate:
+
+```bash
+bash scripts/run_chair_v22.sh
+bash scripts/eval_chair_outputs.sh
+```
+
+Outputs:
+
+```text
+outputs/qwen25vl_chair/results_chair_{method}.json
+outputs/qwen25vl_chair/chair_format_{method}.json
+outputs/qwen25vl_chair/metrics_chair_{method}.json
+outputs/qwen25vl_chair/summary_chair.csv
+```
+
+CHAIR metrics are interpreted as:
+
+- `CHAIRs`: lower is better, caption-level hallucination rate.
+- `CHAIRi`: lower is better, object-instance hallucination rate.
+- `Recall`: higher is better, recalled ground-truth COCO objects.
+- `AvgLen`: caption length; avoid collapse below the greedy baseline.
+- `ObjMentioned`: average generated COCO objects per caption.
+
+### MMHal-Bench
+
+Required:
+
+```bash
+export MMHAL_ROOT=/path/to/MMHal-Bench
+```
+
+The loader expects `response_template.json` under `MMHAL_ROOT`. If it is not
+present, it will try to download `Shengcao1006/MMHal-Bench` from Hugging Face
+and cache the 96 images under `MMHAL_ROOT/images`.
+
+Debug commands:
+
+```bash
+bash scripts/debug_mmhal_20.sh greedy
+bash scripts/debug_mmhal_20.sh token_cd
+bash scripts/debug_mmhal_20.sh eg_mhcd_ae
+```
+
+Full response generation:
+
+```bash
+bash scripts/run_mmhal_v22.sh
+```
+
+Outputs:
+
+```text
+outputs/qwen25vl_mmhal/results_mmhal_{method}.json
+outputs/qwen25vl_mmhal/mmhal_response_{method}.json
+```
+
+Official GPT-4 evaluation is optional and not run by default. After generation,
+use the MMHal-Bench official evaluator with a response file, for example:
+
+```bash
+python eval_gpt4.py \
+  --response outputs/qwen25vl_mmhal/mmhal_response_eg_mhcd_ae.json \
+  --evaluation outputs/qwen25vl_mmhal/eval_eg_mhcd_ae.json \
+  --api-key "$OPENAI_API_KEY"
+```
+
 ## Method list
 
 - `eg_label_cd`: POPE yes/no label-level EntroGraph contrastive scoring.

@@ -163,7 +163,21 @@ class EGMHCDGenerator:
                 "question": raw_item["question"],
                 "candidates": batch_candidates,
             }
-            for key in ("ground_truth", "image_path", "image_name", "question_id", "source_file", "source_index"):
+            for key in (
+                "ground_truth",
+                "gt_answer",
+                "image_path",
+                "image_name",
+                "image_id",
+                "question_id",
+                "source_file",
+                "source_index",
+                "task",
+                "image_content",
+                "question_type",
+                "question_topic",
+                "image_src",
+            ):
                 if raw_item.get(key) is not None:
                     result_item[key] = raw_item[key]
             all_results.append(result_item)
@@ -229,7 +243,21 @@ class SampleMajorityGenerator:
                 "question": raw_item["question"],
                 "candidates": batch_candidates,
             }
-            for key in ("ground_truth", "image_path", "image_name", "question_id", "source_file", "source_index"):
+            for key in (
+                "ground_truth",
+                "gt_answer",
+                "image_path",
+                "image_name",
+                "image_id",
+                "question_id",
+                "source_file",
+                "source_index",
+                "task",
+                "image_content",
+                "question_type",
+                "question_topic",
+                "image_src",
+            ):
                 if raw_item.get(key) is not None:
                     result_item[key] = raw_item[key]
             all_results.append(result_item)

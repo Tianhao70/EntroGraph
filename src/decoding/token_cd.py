@@ -146,6 +146,10 @@ def contrastive_generate(
     inputs_pos = clone_inputs(inputs_pos)
     inputs_neg = clone_inputs(inputs_neg)
     eos_token_ids = _get_eos_token_ids(model, tokenizer)
+    cache_state_pos = None
+    cache_state_neg = None
+    last_token_tensor = None
+    cache_enabled = True
 
     token_ids: list[int] = []
     trace: list[StepTrace] = []
@@ -156,8 +160,31 @@ def contrastive_generate(
     js_norm_values: list[float] = []
 
     for t in range(max_new_tokens):
-        logits_pos = model(**inputs_pos).logits[:, -1, :].float()
-        logits_neg = model(**inputs_neg).logits[:, -1, :].float()
+        if cache_enabled:
+            try:
+                outputs_pos, cache_state_pos = _cached_forward_step(
+                    model,
+                    inputs_pos,
+                    cache_state_pos,
+                    last_token_tensor,
+                )
+                outputs_neg, cache_state_neg = _cached_forward_step(
+                    model,
+                    inputs_neg,
+                    cache_state_neg,
+                    last_token_tensor,
+                )
+                logits_pos = outputs_pos.logits[:, -1, :].float()
+                logits_neg = outputs_neg.logits[:, -1, :].float()
+            except Exception:
+                cache_enabled = False
+                cache_state_pos = None
+                cache_state_neg = None
+                logits_pos = model(**inputs_pos).logits[:, -1, :].float()
+                logits_neg = model(**inputs_neg).logits[:, -1, :].float()
+        else:
+            logits_pos = model(**inputs_pos).logits[:, -1, :].float()
+            logits_neg = model(**inputs_neg).logits[:, -1, :].float()
 
         p_pos = safe_softmax(logits_pos, temperature=temperature)
         p_neg = safe_softmax(logits_neg, temperature=temperature)
@@ -213,6 +240,7 @@ def contrastive_generate(
         token_tensor = next_token.reshape(1)
         inputs_pos = append_token_batch(inputs_pos, token_tensor)
         inputs_neg = append_token_batch(inputs_neg, token_tensor)
+        last_token_tensor = token_tensor
 
         if token_id in eos_token_ids:
             break
@@ -238,6 +266,17 @@ def contrastive_generate(
         avg_logprob_cd=avg_logprob_cd,
         trace=trace,
     )
+
+
+def _cached_forward_step(model, full_inputs, cache_state, last_token_tensor):
+    if cache_state is None:
+        outputs = model(**full_inputs, use_cache=True)
+        return outputs, outputs.past_key_values
+    if last_token_tensor is None:
+        raise RuntimeError("last_token_tensor is required after cache initialization")
+    input_ids = last_token_tensor.to(device=full_inputs["input_ids"].device, dtype=full_inputs["input_ids"].dtype).view(1, 1)
+    outputs = model(input_ids=input_ids, past_key_values=cache_state, use_cache=True)
+    return outputs, outputs.past_key_values
 
 
 class TokenContrastiveDecoder:
@@ -357,7 +396,21 @@ class TokenCDGenerator:
                 "generation": decoded,
                 "selection_mode": "token_cd",
             }
-            for key in ("ground_truth", "image_path", "image_name", "question_id", "source_file", "source_index"):
+            for key in (
+                "ground_truth",
+                "gt_answer",
+                "image_path",
+                "image_name",
+                "image_id",
+                "question_id",
+                "source_file",
+                "source_index",
+                "task",
+                "image_content",
+                "question_type",
+                "question_topic",
+                "image_src",
+            ):
                 if raw_item.get(key) is not None:
                     report_item[key] = raw_item[key]
             results.append(report_item)

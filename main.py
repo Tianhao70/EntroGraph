@@ -28,7 +28,11 @@ def seed_everything(seed: int):
         torch.backends.cudnn.deterministic = False
 
 
-def default_max_new_tokens(method):
+def default_max_new_tokens(method, task="pope"):
+    if task == "chair":
+        return 64
+    if task in ("mmhal", "amber"):
+        return 128
     if method in ("greedy", "label_pos", "vcd_label_const", "eg_label_cd", "sample_majority"):
         return 8
     return 128
@@ -143,13 +147,104 @@ def write_trace_file(final_report, trace_dir, dataset_basename, method):
 def build_result_base(item, method, best_answer):
     return {
         "question_id": item.get("question_id"),
+        "image_id": item.get("image_id"),
         "image_name": item.get("image_name"),
         "image_path": item.get("image_path"),
         "question": item.get("question"),
         "ground_truth": item.get("ground_truth"),
+        "task": item.get("task", "pope"),
         "method": method,
         "best_answer": best_answer,
     }
+
+
+def enrich_open_result(report_item, raw_item, task, answer, args, generation_override=None):
+    report_item["task"] = task
+    if raw_item.get("image_id") is not None:
+        report_item["image_id"] = raw_item.get("image_id")
+
+    if task == "chair":
+        report_item["caption"] = str(answer).strip()
+        report_item["generation"] = generation_override or {
+            "max_new_tokens": args.max_new_tokens,
+            "neg_type": args.neg_type,
+            "num_candidates": args.num_candidates,
+        }
+    elif task == "mmhal":
+        report_item["gt_answer"] = raw_item.get("gt_answer", raw_item.get("ground_truth"))
+        report_item["image_content"] = raw_item.get("image_content", [])
+        report_item["question_type"] = raw_item.get("question_type")
+        report_item["question_topic"] = raw_item.get("question_topic")
+        report_item["image_src"] = raw_item.get("image_src")
+        report_item["generation"] = generation_override or {
+            "max_new_tokens": args.max_new_tokens,
+            "neg_type": args.neg_type,
+            "num_candidates": args.num_candidates,
+        }
+    return report_item
+
+
+def infer_task(args):
+    if args.task:
+        return args.task
+    dataset = str(args.dataset or "").lower()
+    if "pope" in dataset:
+        return "pope"
+    raise ValueError("无法自动推断 task。非 POPE 数据请显式传 --task {chair,mmhal,hallusion,amber}。")
+
+
+def validate_task_method(task, method):
+    allowed = {
+        "pope": {"greedy", "sample_majority", "label_pos", "vcd_label_const", "eg_label_cd", "token_cd", "eg_mhcd_ae"},
+        "chair": {"greedy", "token_cd", "eg_mhcd_ae"},
+        "mmhal": {"greedy", "token_cd", "eg_mhcd_ae"},
+        "hallusion": {"greedy", "label_pos", "eg_label_cd"},
+        "amber": {"greedy", "label_pos", "eg_label_cd", "token_cd", "eg_mhcd_ae"},
+    }
+    if method not in allowed.get(task, set()):
+        raise ValueError(f"method {method} is not supported for task={task}")
+
+
+def load_task_dataset(args, task):
+    if task == "pope":
+        if not args.dataset:
+            raise ValueError("--dataset is required for task=pope")
+        if not args.coco_image_root:
+            raise ValueError("--coco-image-root or COCO_IMAGE_ROOT is required for task=pope")
+        dataset = load_dataset_from_path(args.dataset, args.coco_image_root, split=args.split)
+        if args.limit is not None:
+            dataset = dataset[: args.limit]
+        return dataset
+
+    if task == "chair":
+        if not args.coco_image_root:
+            raise ValueError("--coco-image-root or COCO_IMAGE_ROOT is required for task=chair")
+        if not args.coco_annotation_root:
+            raise ValueError("--coco-annotation-root or COCO_ANN_ROOT is required for task=chair")
+        from src.datasets.coco_caption_dataset import CocoCaptionDataset
+
+        return CocoCaptionDataset(
+            image_root=args.coco_image_root,
+            annotation_root=args.coco_annotation_root,
+            image_ids_file=args.chair_image_ids,
+            limit=args.limit,
+            prompt=args.caption_prompt,
+        ).to_list()
+
+    if task == "mmhal":
+        if not args.mmhal_root:
+            raise ValueError("--mmhal-root or MMHAL_ROOT is required for task=mmhal")
+        from src.datasets.mmhal_dataset import MMHalDataset
+
+        dataset = MMHalDataset(
+            root=args.mmhal_root,
+            response_template=args.mmhal_response_template,
+            limit=args.limit,
+        )
+        args._mmhal_template_path = str(dataset.template_path)
+        return dataset.to_list()
+
+    raise NotImplementedError(f"task={task} loader is a skeleton in this round.")
 
 
 def _trace_file_id(item, item_index):
@@ -180,6 +275,13 @@ def _safe_path_segment(value):
 def main():
     parser = argparse.ArgumentParser(description="EG-MHCD-AE v2 评测流水线")
     parser.add_argument(
+        "--task",
+        type=str,
+        choices=["pope", "chair", "mmhal", "hallusion", "amber"],
+        default=None,
+        help="评测任务；未指定时仅可从 POPE dataset 路径自动推断。",
+    )
+    parser.add_argument(
         "--method",
         type=str,
         choices=[
@@ -195,14 +297,26 @@ def main():
         help="解码/打分方法。",
     )
     parser.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct")
-    parser.add_argument("--dataset", type=str, required=True, help="具体的测试集路径（如 benchs/pope/coco）")
+    parser.add_argument("--dataset", type=str, default=None, help="POPE 测试集路径（如 benchs/pope/coco）")
+    parser.add_argument("--dataset-name", type=str, default=None, help="开放式任务的数据集别名，用于日志与输出。")
     parser.add_argument(
         "--split",
         type=str,
         choices=["random", "popular", "adversarial", "all"],
         default="all",
     )
-    parser.add_argument("--coco-image-root", type=str, required=True, help="COCO val2014 图像根目录")
+    parser.add_argument("--coco-image-root", type=str, default=os.environ.get("COCO_IMAGE_ROOT"), help="COCO val2014 图像根目录")
+    parser.add_argument("--coco-annotation-root", type=str, default=os.environ.get("COCO_ANN_ROOT"), help="COCO annotations 根目录")
+    parser.add_argument("--coco-instance-anno", type=str, default=None, help="预留：COCO instances annotation 文件路径")
+    parser.add_argument("--coco-caption-anno", type=str, default=None, help="预留：COCO captions annotation 文件路径")
+    parser.add_argument("--chair-image-ids", type=str, default=None, help="可选：CHAIR image id 列表文件")
+    parser.add_argument(
+        "--caption-prompt",
+        type=str,
+        default="Describe the image in one concise sentence. Mention only objects that are clearly visible.",
+    )
+    parser.add_argument("--mmhal-root", type=str, default=os.environ.get("MMHAL_ROOT"), help="MMHal-Bench 本地目录")
+    parser.add_argument("--mmhal-response-template", type=str, default=None, help="MMHal response_template.json 路径")
     parser.add_argument("--output-dir", type=str, default="outputs", help="结果 JSON 输出目录")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="未设置时：POPE/label 方法默认 8，生成方法默认 128")
     parser.add_argument("--seed", type=int, default=42)
@@ -224,8 +338,12 @@ def main():
     )
     parser.add_argument("--top-p", type=float, default=0.9, help="token_cd / eg_mhcd_ae nucleus sampling top_p")
     args = parser.parse_args()
+    task = infer_task(args)
+    args.task = task
     method = args.method
-    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else default_max_new_tokens(method)
+    validate_task_method(task, method)
+    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else default_max_new_tokens(method, task)
+    args.max_new_tokens = max_new_tokens
     perturb_seed_base = args.seed if args.perturb_seed_base is None else args.perturb_seed_base
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.trace_dir, exist_ok=True)
@@ -243,9 +361,15 @@ def main():
 
     print("="*50)
     print("🚀 启动 EG-MHCD-AE v2 评测流水线 (Powered by RTX 5090)")
-    print(f"📊 数据集设定: {args.dataset}")
+    print(f"📌 task: {task}")
+    print(f"📊 数据集设定: {args.dataset or args.dataset_name or task}")
     print(f"📊 split: {args.split}")
-    print(f"🖼️  COCO 图像根目录: {args.coco_image_root}")
+    if args.coco_image_root:
+        print(f"🖼️  COCO 图像根目录: {args.coco_image_root}")
+    if args.coco_annotation_root:
+        print(f"📝 COCO annotation 根目录: {args.coco_annotation_root}")
+    if args.mmhal_root:
+        print(f"🧾 MMHal 根目录: {args.mmhal_root}")
     print(f"⚙️  解码模式设定: {method}")
     print(f"🎲 随机种子: {args.seed}")
     print(f"🎲 扰动 seed 基准: {perturb_seed_base}")
@@ -335,11 +459,10 @@ def main():
     # 步骤 3：接入评测数据
     # ---------------------------------------------------------
     print("\n[3/5] 正在挂载评测数据集 (准备锁页内存传输)...")
-    real_dataset = load_dataset_from_path(args.dataset, args.coco_image_root, split=args.split)
+    real_dataset = load_task_dataset(args, task)
     if args.limit is not None:
-        real_dataset = real_dataset[: args.limit]
         print(f"🐞 Debug limit 启用：仅运行前 {len(real_dataset)} 条样本。")
-    print(f"✅ 成功从 {args.dataset} 加载了 {len(real_dataset)} 笔测试数据。")
+    print(f"✅ 成功从 {args.dataset or args.dataset_name or task} 加载了 {len(real_dataset)} 笔测试数据。")
     
     # 高吞吐 DataLoader, Batch Size 设为 1（直接传入 List，无需额外类型转换）
     dataloader = build_high_throughput_dataloader(real_dataset, processor, batch_size=1)
@@ -414,6 +537,8 @@ def main():
                     "config": generation.get("config"),
                 }
             )
+            if task in ("chair", "mmhal"):
+                enrich_open_result(report_item, item, task, report_item["best_answer"], args, generation_public)
             final_report.append(report_item)
         gen_time = time.time() - start_time
         for item in generation_report:
@@ -429,7 +554,7 @@ def main():
         generation_results = generator.generate_candidates(dataloader)
         trace_report.extend(
             {
-                **{key: item.get(key) for key in ("question_id", "question", "image_name", "source_file", "source_index")},
+                **{key: item.get(key) for key in ("question_id", "question", "image_name", "image_id", "source_file", "source_index")},
                 "candidate_details": item.get("candidates", []),
             }
             for item in generation_results
@@ -499,6 +624,8 @@ def main():
                         "embedding_mode": getattr(rerank_result, "embedding_mode", None),
                     }
                 )
+            if task in ("chair", "mmhal"):
+                enrich_open_result(report_item, item, task, best_ans, args)
             final_report.append(report_item)
             
             print(f"\n❓ 问题: {question}")
@@ -521,6 +648,19 @@ def main():
             generated_text = processor.batch_decode(output_ids[:, input_len:], skip_special_tokens=True)
             
             report_item = build_result_base(raw_items[0], method, generated_text[0])
+            if task in ("chair", "mmhal"):
+                enrich_open_result(
+                    report_item,
+                    raw_items[0],
+                    task,
+                    generated_text[0],
+                    args,
+                    {
+                        "max_new_tokens": max_new_tokens,
+                        "neg_type": args.neg_type,
+                        "num_candidates": args.num_candidates,
+                    },
+                )
             final_report.append(report_item)
             
             print(f"\n❓ 问题: {raw_items[0]['question']}")
@@ -533,16 +673,45 @@ def main():
         print(f"\n[5/5] ✅ Greedy 生成完毕！耗时: {gen_time:.2f} 秒")
 
     # 动态命名保存结果文件
-    dataset_basename = os.path.splitext(os.path.basename(args.dataset.strip('/')))[0]
-    if not dataset_basename:
-        dataset_basename = "unknown_dataset"
+    if task == "pope":
+        dataset_basename = os.path.splitext(os.path.basename(str(args.dataset).strip('/')))[0]
+        if not dataset_basename:
+            dataset_basename = "unknown_dataset"
+    elif task == "chair":
+        dataset_basename = "chair"
+    elif task == "mmhal":
+        dataset_basename = "mmhal"
+    else:
+        dataset_basename = args.dataset_name or task
         
     trace_paths = write_trace_file(trace_report, args.trace_dir, dataset_basename, method)
-    output_filename = os.path.join(args.output_dir, f"results_{dataset_basename}_{method}.json")
+    if task == "chair":
+        output_filename = os.path.join(args.output_dir, f"results_chair_{method}.json")
+    elif task == "mmhal":
+        output_filename = os.path.join(args.output_dir, f"results_mmhal_{method}.json")
+    else:
+        output_filename = os.path.join(args.output_dir, f"results_{dataset_basename}_{method}.json")
     
     # 保存最终结果到本地
     with open(output_filename, "w", encoding="utf-8") as f:
         json.dump(final_report, f, ensure_ascii=False, indent=2)
+
+    if task == "chair":
+        from src.eval.chair_eval import convert_to_chair_format
+
+        chair_output = os.path.join(args.output_dir, f"chair_format_{method}.json")
+        convert_to_chair_format(output_filename, chair_output)
+        print(f"🪑 CHAIR 适配文件已保存至 {chair_output}")
+    elif task == "mmhal":
+        from src.eval.mmhal_format import convert_to_mmhal_response
+
+        mmhal_output = os.path.join(args.output_dir, f"mmhal_response_{method}.json")
+        convert_to_mmhal_response(
+            output_filename,
+            mmhal_output,
+            template_json=getattr(args, "_mmhal_template_path", args.mmhal_response_template),
+        )
+        print(f"🧾 MMHal response 文件已保存至 {mmhal_output}")
         
     print(f"\n🎉 全线贯通！评测报告已成功保存至 {output_filename}")
     if trace_paths:
